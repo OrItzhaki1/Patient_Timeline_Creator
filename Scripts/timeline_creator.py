@@ -4,6 +4,12 @@ from cd01_utils_OI import viedoc_to_df
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+from cd02_parse_blood_OI import parse_blood
+import streamlit as st
+# from streamlit_timeline import st_timeline
+
+CLINCAL_DATA_PATH = '../Input/2024-03-26_V3_clinical_data_full.xlsx'
+VIEDOC_EXPORT_PATH = '../Input/OncoHost_20231224_145142.xlsx'
 
 
 def fix_dates(date_str):
@@ -59,83 +65,107 @@ def get_treatment_change_and_stop(clin_dict):
     return main_df
 
 
+def parse_orr_assessments(clin_dict):
+    orr_df = viedoc_to_df(clin_dict['REC'], remove_retro=False).reset_index()
+    orr_df.rename(columns={'Date ORR was completed:': 'ORRAssessmentDate',
+                           'Overall Response Rate:': 'Rate'}, inplace=True)
+    orr_df = orr_df[(orr_df['Was theOverall Response Rate evaluated?'] != 'No') & orr_df['Rate'].notna()]
+    # todo: consider what to do with empty rates?
+    return orr_df[['SubjectId', 'ORRAssessmentDate', 'Rate']]
+
+
 if __name__ == '__main__':
     # get input:
-    clin_dict = pd.read_excel('Input/OncoHost_20231224_145142.xlsx', sheet_name=None)
-    dup_id_df = pd.read_excel('Input/Duplicate_chemo_immuno_patients.xlsx')
-    clinical_df = pd.read_excel('Input/duplicate patients cohort data.xlsx')
-    cols_to_keep = ['SubjectId', 'FirstTreatmentDate', 'ProgressionDate', 'OSDate', 'LastFollowUpVisitDate']  # add orr's?
+    # TODO: currently only some fields include curation - input type may change
+    clin_dict = pd.read_excel(VIEDOC_EXPORT_PATH, sheet_name=None)
+    clinical_df = pd.read_excel(CLINCAL_DATA_PATH)
+    cols_to_keep = ['SubjectId', 'FirstTreatmentDate', 'ORR3MonthsDate', 'ORR3MonthsValue', 'ORR6MonthsDate',
+                    'ORR6MonthsValue', 'ORR12MonthsDate', 'ORR12MonthsValue', 'ProgressionDate', 'OSDate',
+                    'LastFollowUpVisitDate']
     clinical_df = clinical_df[cols_to_keep]
 
     # get all events of treatment change, stop or eos:
     change_stop_df = get_treatment_change_and_stop(clin_dict)
 
+    # get all blood collection events
+    blood_df, treatment_df = parse_blood(clin_dict)
+
+    # get all overall response assessments:
+    orr_df = parse_orr_assessments(clin_dict)
+
     all_timelines = []
     chemo_prog_to_ici_durations = []
 
     # get events for each patient (duplicates) and create timeline:
-    for i, row in dup_id_df.iterrows():
+    # tuple format: [text, date, category]
+    # categories: survival, blood collections, treatments
+    for i, row in clinical_df.iterrows():
         events = []
-        chemo_sub_id = row['SubjectId_Chemo']
-        ici_sub_id = row['SubjectId_Immuno']
+        sub_id = row['SubjectId']
 
-        # these dates should be equal in both dubs:
-        for col in ['OSDate', 'LastFollowUpVisitDate']:
-            date1 = clinical_df.loc[clinical_df['SubjectId'] == ici_sub_id, col].iloc[0]
-            date2 = clinical_df.loc[clinical_df['SubjectId'] == chemo_sub_id, col].iloc[0]
-            if pd.notna(date1) and pd.notna(date2) and (date1 != date2):
-                print(f"descriptancy between duplicates {chemo_sub_id} and {ici_sub_id} on {col}")
+        if sub_id not in ['GB-023-7302-NSCLC', 'IL-001-1011-NSCLC', 'IL-014-1903-NSCLC', 'GB-028-7803-NSCLC',
+                          'GB-029-7902-NSCLC', 'IL-014-1906-NSCLC', 'GB-025-7513-NSCLC', 'GB-023-7302-NSCLC']:
+            continue
 
         # 'FirstTreatmentDate', 'ProgressionDate', 'OSDate', 'LastFollowUpVisitDate'
-        tup1 = ('1st Chemo', clinical_df.loc[clinical_df['SubjectId'] == chemo_sub_id, 'FirstTreatmentDate'].iloc[0], 'C')
-        tup2 = ('1st Immuno', clinical_df.loc[clinical_df['SubjectId'] == ici_sub_id, 'FirstTreatmentDate'].iloc[0], 'I')
-        tup3 = ('Progression Chemo', clinical_df.loc[clinical_df['SubjectId'] == chemo_sub_id, 'ProgressionDate'].iloc[0], 'C')
-        tup4 = ('Progression Immuno', clinical_df.loc[clinical_df['SubjectId'] == ici_sub_id, 'ProgressionDate'].iloc[0], 'I')
-        if pd.isna(clinical_df.loc[clinical_df['SubjectId'] == ici_sub_id, 'OSDate'].iloc[0]):
+        tup1 = ('1st Treatment', clinical_df.loc[clinical_df['SubjectId'] == sub_id, 'FirstTreatmentDate'].iloc[0], 'Treatments')
+        tup2 = ('Progression', clinical_df.loc[clinical_df['SubjectId'] == sub_id, 'ProgressionDate'].iloc[0], 'Survival')
+        if pd.isna(clinical_df.loc[clinical_df['SubjectId'] == sub_id, 'OSDate'].iloc[0]):
             # add last follow up only if there is not death
-            tup5 = ('Last FU', clinical_df.loc[clinical_df['SubjectId'] == ici_sub_id, 'LastFollowUpVisitDate'].iloc[0], 'I')
+            tup3 = ('Last FU', clinical_df.loc[clinical_df['SubjectId'] == sub_id, 'LastFollowUpVisitDate'].iloc[0], 'Survival')
         else:
-            tup5 = ('Death', clinical_df.loc[clinical_df['SubjectId'] == ici_sub_id, 'OSDate'].iloc[0], 'I')
-        events.extend([tup1, tup2, tup3, tup4, tup5])
+            tup3 = ('Death', clinical_df.loc[clinical_df['SubjectId'] == sub_id, 'OSDate'].iloc[0], 'Survival')
+        events.extend([tup1, tup2, tup3])
+        #
+        # # get treatment events:
+        # trt1_df = change_stop_df[(change_stop_df['SubjectId'] == sub_id)]
+        # for i, row in trt1_df.iterrows():
+        #     if row['StatusType'] != 'Death':
+        #         tup = (row['EventText'], row['DateStatus'], 'Treatments')
+        #         events.append(tup)
 
-        # get treatment events:
-        trt1_df = change_stop_df[(change_stop_df['SubjectId'] == chemo_sub_id)]
-        for i, row in trt1_df.iterrows():
-            if row['StatusType'] != 'Death':
-                tup = (row['EventText'], row['DateStatus'], 'C')
-                events.append(tup)
-        trt2_df = change_stop_df[(change_stop_df['SubjectId'] == ici_sub_id)]
-        for i, row in trt2_df.iterrows():
-            if row['StatusType'] != 'Death':
-                tup = (row['EventText'], row['DateStatus'], 'I')
-                events.append(tup)
+        # get blood collection events:
+        blood1_df = blood_df[(blood_df['SubjectId'] == sub_id)]
+        for i, row in blood1_df.iterrows():
+            tup = ('Blood collection', row['BloodCollectionDate'], 'Blood collection')
+            events.append(tup)
+
+        # # get all ORR's:
+        # orr1_df = orr_df[orr_df['SubjectId'] == sub_id]
+        # for i, row in blood1_df.iterrows():
+        #     text = 'Response measured: ' + row['Rate']
+        #     tup = (text, row['ORRAssessmentDate'], 'Survival')
 
         events_df = pd.DataFrame(events, columns=['Event', 'Date', 'Type'])
         events_df = events_df.drop_duplicates()
 
         # remove empty dates and sort by dates
         events_df = events_df[events_df['Date'].notna()]
-        events_df['Date'] = pd.to_datetime(events_df['Date'])
+        events_df['Date'] = events_df['Date'].astype(str).apply(fix_dates)
+        events_df['Date'] = pd.to_datetime(events_df['Date']).dt.strftime('%Y-%m-%d')
         events_df.sort_values(by='Date', inplace=True)
 
-        # get chemo progression to start ici duration for histogram:
-        if ('1st Immuno' in events_df['Event'].values) and ('Progression Chemo' in events_df['Event'].values):
-            date1 = events_df.loc[events_df['Event'] == '1st Immuno', 'Date'].iloc[0]
-            date2 = events_df.loc[events_df['Event'] == 'Progression Chemo', 'Date'].iloc[0]
-            durr = (date1 - date2).days
-            chemo_prog_to_ici_durations.append(durr)
-
         # plot timeline save as png
-        color_map = {'C': 'tab:blue', 'I': 'tab:orange'}
+        # todo: implement
+
         nums = [(-1) ** i * (i + 1) for i in range(20, 0, -1)]
         levels = np.tile(nums, int(np.ceil(len(events_df) / 6)))[:len(events_df)]
         fig, ax = plt.subplots(figsize=(10, 4), constrained_layout=True)
-        ax.set(title=f"Timeline of Events ({chemo_sub_id}/{ici_sub_id})")
+        ax.set(title=f"Timeline of Events ({sub_id})")
+
+        # Convert dates to matplotlib datetime objects
+        events_df['Date'] = pd.to_datetime(events_df['Date'])
+
         for date, level, event_type in zip(events_df['Date'], levels, events_df['Type']):
-            color = color_map.get(event_type, 'black')
+            if event_type == 'Blood collection':
+                color = 'tab:orange'
+            else:
+                color = 'tab:blue'
             ax.vlines(date, 0, level, color=color, alpha=0.7)  # The vertical stems.
+
         ax.plot(events_df['Date'], np.zeros_like(events_df['Date']), "-o",
                 color="k", markerfacecolor="w")  # Baseline and markers on it.
+        print(sub_id)
         for date, level, event in zip(events_df['Date'], levels, events_df['Event']):
             xytext = (3, -5 if np.sign(level) > 0 else 1)
             ax.annotate(event, xy=(date, level),
@@ -143,31 +173,28 @@ if __name__ == '__main__':
                         fontsize=6,  # Adjust font size
                         horizontalalignment="left",
                         verticalalignment="center")
-        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+            print(date)
+        print()
+        # Set x-axis to display ticks every month
+        ax.xaxis.set_major_locator(mdates.MonthLocator())
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+
         plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
         ax.yaxis.set_visible(False)
         ax.tick_params(axis='x', labelsize=5)
         ax.spines[["left", "top", "right"]].set_visible(False)
         ax.grid(True, which='both', linestyle='--', linewidth=0.3)
         ax.margins(y=0.1)
-        plt.savefig(f'Plots/{chemo_sub_id}_{ici_sub_id}_timeline.png')
+
+        plt.savefig(f'../Plots/{sub_id}_timeline.png')
         plt.close()
 
-        events_df['Date'] = pd.to_datetime(events_df['Date']).dt.strftime('%Y-%m-%d')
-        # check if first treatment date exists, if not add to the begining of the df first treatment with no date
-        if '1st Chemo' not in events_df['Event'].values:
-            new_row = {'Event': '1st Chemo', 'Date': 'Unknown date'}
-            events_df = pd.concat([pd.DataFrame([new_row]), events_df], ignore_index=True)
-        if '1st Immuno' not in events_df['Event'].values:
-            new_row = {'Event': '1st Immuno', 'Date': 'Unknown date'}
-            events_df = pd.concat([pd.DataFrame([new_row]), events_df], ignore_index=True)
-
         subject_summary_row = '. '.join([f"{row['Date']}-{row['Event']}" for _, row in events_df.iterrows()])
-        all_timelines.append({'SubjectIdChemo': chemo_sub_id,
-                              'SubjectIdImmuno': ici_sub_id,
+        all_timelines.append({'SubjectId': sub_id,
                               'Timeline': subject_summary_row})
 
-# Reset index
-main_summary_df = pd.DataFrame(all_timelines)
-main_summary_df.to_csv('all_timelines.csv', index=False)
+    # Reset index
+    main_summary_df = pd.DataFrame(all_timelines)
+    main_summary_df.to_csv('all_timelines.csv', index=False)
+
+    # todo: combine dublicated patients?
